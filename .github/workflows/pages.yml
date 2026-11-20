@@ -1,0 +1,84 @@
+name: Deploy to Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check the app
+        run: |
+          node --check app.js
+          node --check sw.js
+
+      - name: Validate the manifest and the shell
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path(".")
+          manifest = json.loads((root / "manifest.webmanifest").read_text(encoding="utf-8"))
+          assert manifest["name"] and manifest["start_url"], "manifest needs a name and start_url"
+          assert manifest["display"] == "standalone"
+          assert manifest["share_target"]["params"]["text"] == "text"
+
+          # A service worker never caches itself, so it is checked separately.
+          shell = ["index.html", "styles.css", "app.js", "manifest.webmanifest",
+                   "icons/icon-192.png", "icons/icon-512.png"]
+          missing = [name for name in shell + ["sw.js"] if not (root / name).exists()]
+          if missing:
+              sys.exit(f"missing shell files: {missing}")
+
+          icons = [entry["sizes"] for entry in manifest["icons"]]
+          assert "192x192" in icons and "512x512" in icons, f"icons look wrong: {icons}"
+
+          cached = (root / "sw.js").read_text(encoding="utf-8")
+          for name in shell:
+              assert name in cached, f"{name} is not precached by the service worker"
+
+          print("web shell ok:", len(shell), "files, icons", icons)
+          PY
+
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          cp -r index.html styles.css app.js sw.js manifest.webmanifest icons _site/
+          touch _site/.nojekyll
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
